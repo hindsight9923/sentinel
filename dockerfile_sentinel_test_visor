@@ -1,0 +1,93 @@
+#Import the latest ubuntu image which is 24.04 (Noble)
+FROM ubuntu:latest
+
+# Credit to TrinityStake for the great documentation to help make this possible
+# Dockerfile Contents authored by Misfits (The Expanse)
+
+WORKDIR /
+
+# Install all of the basics we need to perform the install
+RUN apt-get update -y &&\
+apt-get install software-properties-common -y &&\
+apt-get install nano -y &&\
+apt-get install wget -y &&\
+apt-get install curl git jq make unzip gcc -y
+
+
+# Perform some user housekeeping. Please change these if you use this image in production
+RUN echo 'root:sentinelhub' | chpasswd &&\
+useradd -ms /bin/bash sentinel &&\
+echo 'sentinel:sentinel' | chpasswd
+
+# Switch directory to sentinel home 
+WORKDIR /home/sentinel
+
+# Install Golang
+RUN yes '' | add-apt-repository ppa:longsleep/golang-backports &&\
+apt-get install golang-go -y  &&\
+echo 'export GOROOT=/usr/lib/go' >> .bashrc &&\
+echo 'export GOPATH=${HOME}/go' >> .bashrc &&\
+echo 'export GOBIN=${GOPATH}/bin' >> .bashrc &&\
+echo 'export PATH=${PATH}:${GOROOT}/bin:${GOBIN}' >> .bashrc
+
+
+# Install Sentinel Hub please note the version is v12 here the current testnet version
+# Must be sentinel or make install executes incorrectly
+USER sentinel 
+RUN git clone https://github.com/sentinel-official/hub.git "/home/sentinel/sentinelhub"
+
+WORKDIR /home/sentinel/sentinelhub
+
+RUN git checkout v12.0.0-rc8 &&\
+make install 
+
+#root must perform the symlink
+USER root 
+RUN ln -s "/home/sentinel/go/bin/sentinelhub" /usr/bin/sentinelhub
+
+
+USER sentinel 
+
+# Initialize the chain and replace the genesis file
+RUN sentinelhub init --chain-id bluenet-2-1 "Bluenet | Docker" &&\
+curl -fsLS -o "${HOME}/genesis.json" "https://raw.githubusercontent.com/sentinel-official/networks/main/bluenet-2-1/genesis.json" &&\
+cp "${HOME}/genesis.json" "${HOME}/.sentinelhub/config/genesis.json" &&\
+rm "${HOME}/genesis.json"
+
+# Configure Sentinel Hub
+WORKDIR /home/sentinel/.sentinelhub/config
+
+# Replace seeds, peers with sentinelhub ones, enable state-sync, multiple chunk fetches, and add gas prices
+RUN sed -i 's/seeds = ""/seeds = ""/g' config.toml &&\
+sed -i 's/persistent_peers = ""/persistent_peers = "5765c3c58643dd640b642fcd7c1e9fa1e9fbb16f@217.182.23.121:51056,ebc2c3b5a201b15a3096bb54637a5c85b8276ab6@45.157.11.146:51056,5fd16a5add7925a0c086ba6434a486a7d461b3f8@139.162.3.204:26656,7437c7563fff18c72aca659918a51e5a938d6b0e@139.162.57.160:26656"/g' config.toml &&\
+sed -i 's/enable = false/enable = true/g' config.toml &&\
+sed -i 's/chunk_fetchers = "4"/chunk_fetchers = "42"/g' config.toml &&\
+sed -i 's/minimum-gas-prices = "0.1udvpn"/minimum-gas-prices = "0.01ibc\/31FEE1A2A9F9C01113F90BD0BBCCE8FD6BBB8585FAF109A2101827DD1D5B95B8,0.1udvpn,0.01ibc\/B1C0DDB14F25279A2026BC8794E12B259F8BDA546A3C5132CCAEE4431CE36783,0.01ibc\/ED07A3391A112B175915CD8FAF43A2DA8E4790EDE12566649D0C2F97716B8518,0.01ibc\/A8C2D23A1E6F95DA4E48BA349667E322BD7A6C996D8A4AAE8BA72E190F3D1477"/g' app.toml
+
+# Replicate the state-sync-bluevisor script for bluenet
+COPY state-sync-bluevisor.sh /home/sentinel/sentinelhub
+WORKDIR /home/sentinel/sentinelhub
+
+# Modify permissions to enable script run
+USER root
+RUN chown sentinel state-sync-bluevisor.sh &&\
+chmod 700 state-sync-bluevisor.sh &&\
+ln -s /home/sentinel/go/bin/cosmovisor /usr/local/bin/
+
+USER sentinel
+
+# Install Cosmovisor 
+RUN go install cosmossdk.io/tools/cosmovisor/cmd/cosmovisor@latest &&\
+mkdir -p ~/.sentinelhub/cosmovisor &&\
+mkdir -p ~/.sentinelhub/cosmovisor/genesis &&\
+mkdir -p ~/.sentinelhub/cosmovisor/genesis/bin &&\
+mkdir -p ~/.sentinelhub/cosmovisor/upgrades &&\
+echo "# Cosmovisor Environmental Variables" >> ~/.bashrc &&\
+echo "export DAEMON_NAME=sentinelhub" >> ~/.bashrc &&\
+echo "export DAEMON_HOME=$HOME/.sentinelhub" >> ~/.bashrc &&\
+echo "export DAEMON_ALLOW_DOWNLOAD_BINARIES=false" >> ~/.bashrc &&\
+echo "export DAEMON_LOG_BUFFER_SIZE=512" >> ~/.bashrc &&\
+echo "export DAEMON_RESTART_AFTER_UPGRADE=true" >> ~/.bashrc &&\
+echo "export UNSAFE_SKIP_BACKUP=true" >> ~/.bashrc &&\
+cp /home/sentinel/go/bin/sentinelhub ~/.sentinelhub/cosmovisor/genesis/bin
+
